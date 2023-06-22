@@ -41,7 +41,28 @@ function update!(rls::RLS, ynew::Float64, xnew::Float64)
     rls.x = cat(xnew, rls.x[1:end-1]; dims=1) # shift in current x for next step
     rls.y = cat(-ynew, rls.y[1:end-1]; dims=1) # shift in new y for next step
     
-    return w, P
+    return rls.w, rls.P
+end
+
+# updates the RLS estimator with an adaptive forgetting factor that keeps the 
+# trace of P constant to avoid numerical blow-up or convergence to zero
+function updateTrace!(rls::RLS, ynew::Float64, xnew::Float64)
+    h = cat(rls.y, rls.x, dims=1) # build regressor
+    
+    rls.α = tr(rls.P) / size(P)[1] 
+
+    rls.P /= rls.α 
+
+    rls.w = rls.w - rls.P*h*(h'*rls.w - ynew)/(1 + h'*rls.P*h) 
+    rls.P = rls.P - rls.P * h * h' *rls.P' / (1 + h' * rls.P * h)
+    
+    # pred = rls.w' * cat(rls.y, rls.x, dims=1) # predicted output
+    # print("error: $(pred-ynew)\n")
+
+    rls.x = cat(xnew, rls.x[1:end-1]; dims=1) # shift in current x for next step
+    rls.y = cat(-ynew, rls.y[1:end-1]; dims=1) # shift in new y for next step
+    
+    return rls.w, rls.P
 end
 ##############################################################################
 
@@ -108,12 +129,12 @@ function affect!(integrator)
 
     # Update RLS estimator
     rls = integrator.p[2]
-    ynew = C*integrator.u + D*xnew   # measure output
-    update!(rls, ynew[1], xnew)      
+    ynew = C*integrator.u + D*xnew              # measure output
+    w,P = update!(rls, ynew[1], xnew)           # constant forgetting factor -> unstable P
+    # w,P = updateTrace!(rls, ynew[1], xnew)    # not sure yet if this works correctly 
     # Logging
-    push!(w_est, rls.w)
-    push!(P_est, rls.P)
-    # push!(y_pred, pred)
+    push!(w_est, w)
+    push!(P_est, P)
 end
 cb = DiscreteCallback(condition, affect!, save_positions=(true, true))
 
@@ -127,10 +148,19 @@ sol = solve(prob, Tsit5(), reltol=1e-8, abstol=1e-8)
 # Evaluation
 plotly()
 # gr()
+# System plots
 plot(sol, idxs=(0, 1, 2), label=["t" "x1" "x2"], xaxis="Time [s]", yaxis="x1", zaxis="x2", size=(1500,800))
 plot(sol, label=["x1" "x2"], xaxis="Time [s]", yaxis="x")
 plot((C*sol(tctrl))', label="Output")
-plot!(y_pred, label="RLS")
+# Estimation plots
 w_est = reduce(hcat,w_est)
+# extract 4 vectors containing the diagonal elements of P_est
+σ_a1 =[(P_est[i][1,1] >= 0 ? sqrt(P_est[i][1,1]) : 0) for i in 1:length(P_est)];
+σ_a2 =[(P_est[i][2,2] >= 0 ? sqrt(P_est[i][2,2]) : 0) for i in 1:length(P_est)];
+σ_b1 =[(P_est[i][3,3] >= 0 ? sqrt(P_est[i][3,3]) : 0) for i in 1:length(P_est)];
+σ_b2 =[(P_est[i][4,4] >= 0 ? sqrt(P_est[i][4,4]) : 0) for i in 1:length(P_est)];
+
 plot(tctrl[1:end-1], w_est',figsize=(800, 600), label=["a1" "a2" "b1" "b2"], xaxis="Time [s]", yaxis="Parameters", size=(1500,800))
-hline!(wtrue)
+# fill area around w_est with std deviation σ
+plot!(tctrl[1:end-1], w_est', ribbon=(σ_a1, σ_a2, σ_b1, σ_b2), fillalpha=0.2, label=["σ_a1" "σ_a2" "σ_b1" "σ_b2"])
+# hline!(wtrue)
